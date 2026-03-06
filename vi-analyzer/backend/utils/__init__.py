@@ -64,137 +64,188 @@ def _get_crumb(session: cffi_requests.Session) -> str | None:
 
 def fetch_ticker_info(sym: str, retries: int = 3, delay: float = 2.0):
     """
-    Fetch a yfinance Ticker plus a rich ``info`` dict for *sym* using
-    the crumb-based Yahoo Finance v10/quoteSummary API.
+    Fetch a yfinance Ticker and build a rich ``info`` dict without relying on
+    ``Ticker.info`` (which requires the Yahoo Finance crumb/quoteSummary API
+    that is blocked on shared server IPs like Render free tier).
 
-    Strategy
-    --------
-    1. Create a curl_cffi chrome124 session.
-    2. Warm the session (cookies) and obtain a crumb token.
-    3. Fetch v10/quoteSummary with all useful modules.
-    4. Build an ``info`` dict compatible with the rest of the codebase.
-    5. Return (ticker, info, session) — the same session is passed to
-       ``yf.Ticker`` so subsequent ``.financials`` / ``.cashflow`` /
-       ``.balance_sheet`` calls reuse the authenticated cookies.
+    Data sources (all use the chart/v8 endpoint which is never blocked):
+      - ``Ticker.fast_info``      — price, market cap, shares, 52w range
+      - ``Ticker.financials``     — income statement (revenue, margins, EBIT…)
+      - ``Ticker.cashflow``       — FCF, operating CF, capex
+      - ``Ticker.balance_sheet``  — assets, equity, debt, current ratio
+      - ``Ticker.info``           — attempted last; if it fails or is sparse
+                                    we fill from computed values above
 
-    Raises
-    ------
-    Exception  if all retries fail or the response contains fewer than
-               5 meaningful keys (Yahoo rate-limit sentinel).
+    Returns (ticker_obj, info_dict).
+    Raises Exception if price data is completely unavailable.
     """
-    MODULES = (
-        "financialData,defaultKeyStatistics,"
-        "incomeStatementHistory,cashflowStatementHistory,"
-        "balanceSheetHistory,summaryDetail,price,assetProfile"
-    )
-
     for attempt in range(retries):
         try:
             session = _make_session()
-            crumb = _get_crumb(session)
-            if not crumb:
-                raise Exception("Could not obtain crumb")
+            t = yf.Ticker(sym, session=session)
 
-            url = (
-                f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
-                f"?modules={MODULES}&crumb={crumb}"
-            )
-            resp = session.get(url, timeout=20)
+            # ── 1. fast_info (chart endpoint — always works) ─────────────
+            fi = t.fast_info
+            price      = _sf(fi.last_price)
+            market_cap = _sf(fi.market_cap)
+            shares     = _sf(fi.shares)
+            currency   = getattr(fi, "currency", "USD") or "USD"
 
-            if resp.status_code == 401:
-                raise Exception("Yahoo Finance returned 401 (invalid crumb/cookies)")
-            if resp.status_code == 429:
-                raise Exception("Too Many Requests")
-            if resp.status_code != 200:
-                raise Exception(f"quoteSummary returned HTTP {resp.status_code}")
+            if not price:
+                raise Exception(f"No price data for {sym}")
 
-            result = resp.json().get("quoteSummary", {}).get("result") or []
-            if not result:
-                error = resp.json().get("quoteSummary", {}).get("error") or {}
-                raise Exception(f"quoteSummary error: {error}")
+            # ── 2. Financial statements (also use chart endpoint) ─────────
+            def _row(stmt, *keys):
+                if stmt is None or stmt.empty:
+                    return None
+                for key in keys:
+                    if key in stmt.index:
+                        v = stmt.loc[key].iloc[0]
+                        try:
+                            f = float(v)
+                            return None if f != f else f   # NaN guard
+                        except (TypeError, ValueError):
+                            pass
+                return None
 
-            raw = result[0]
+            def _col_years(stmt, *keys):
+                """Return list oldest→newest (up to 5 yrs) for a row."""
+                if stmt is None or stmt.empty:
+                    return []
+                for key in keys:
+                    if key in stmt.index:
+                        vals = stmt.loc[key].dropna()
+                        return [_sf(v) for v in reversed(vals.tolist())]
+                return []
 
-            def _raw(section: dict, key: str):
-                v = section.get(key)
-                if isinstance(v, dict):
-                    return v.get("raw")
-                return v
+            try:
+                fin = t.financials
+            except Exception:
+                fin = None
+            try:
+                cf = t.cashflow
+            except Exception:
+                cf = None
+            try:
+                bal = t.balance_sheet
+            except Exception:
+                bal = None
 
-            fd  = raw.get("financialData",       {})
-            dk  = raw.get("defaultKeyStatistics", {})
-            sd  = raw.get("summaryDetail",        {})
-            pr  = raw.get("price",                {})
-            ap  = raw.get("assetProfile",         {})
+            revenue    = _row(fin, "Total Revenue")
+            gross_p    = _row(fin, "Gross Profit")
+            ebit       = _row(fin, "EBIT", "Operating Income")
+            ebitda     = _row(fin, "EBITDA", "Normalized EBITDA")
+            net_inc    = _row(fin, "Net Income")
+            int_exp    = _row(fin, "Interest Expense")
+            fcf        = _row(cf,  "Free Cash Flow")
+            op_cf      = _row(cf,  "Operating Cash Flow",
+                               "Cash Flow From Continuing Operating Activities")
+            capex      = _row(cf,  "Capital Expenditure")
+            tot_assets = _row(bal, "Total Assets")
+            tot_equity = _row(bal, "Stockholders Equity", "Common Stock Equity")
+            tot_debt   = _row(bal, "Total Debt")
+            cur_assets = _row(bal, "Current Assets")
+            cur_liab   = _row(bal, "Current Liabilities")
+
+            # Derive FCF if not directly available
+            if fcf is None and op_cf is not None and capex is not None:
+                fcf = op_cf + capex
+
+            # Compute ratios from statements
+            gross_margins   = _sf(gross_p / revenue) if revenue and gross_p else None
+            op_margins      = _sf(ebit    / revenue) if revenue and ebit    else None
+            profit_margins  = _sf(net_inc / revenue) if revenue and net_inc else None
+            ebitda_margins  = _sf(ebitda  / revenue) if revenue and ebitda  else None
+            roe             = _sf(net_inc / tot_equity) if tot_equity and net_inc else None
+            roa             = _sf(net_inc / tot_assets) if tot_assets and net_inc else None
+            debt_to_equity  = _sf(tot_debt / tot_equity * 100) if tot_equity and tot_debt else None
+            current_ratio   = _sf(cur_assets / cur_liab) if cur_assets and cur_liab else None
+            pe_computed     = _sf(market_cap / net_inc) if market_cap and net_inc and net_inc > 0 else None
+            pfcf_computed   = _sf(market_cap / fcf)     if market_cap and fcf and fcf > 0 else None
+            ev_computed     = (market_cap or 0) + (tot_debt or 0)
+            ev_ebitda_comp  = _sf(ev_computed / ebitda) if ebitda and ebitda > 0 else None
+            book_value_ps   = _sf(tot_equity / shares)  if tot_equity and shares else None
+            pb_computed     = _sf(price / book_value_ps) if price and book_value_ps else None
+
+            # ── 3. Try Ticker.info for enrichment (beta, PE, sector…) ────
+            extra = {}
+            try:
+                raw_info = t.info or {}
+                if len(raw_info) >= 10:
+                    extra = raw_info
+                    logger.debug("fetch_ticker_info: Ticker.info returned %d keys", len(raw_info))
+                else:
+                    logger.debug("fetch_ticker_info: Ticker.info too sparse (%d keys), using computed values", len(raw_info))
+            except Exception as ie:
+                logger.debug("fetch_ticker_info: Ticker.info failed (%s), using computed values", ie)
+
+            # ── 4. Build unified info dict ────────────────────────────────
+            def _e(key, fallback=None):
+                """Get from extra (Ticker.info) or return fallback."""
+                v = extra.get(key)
+                return v if v is not None else fallback
 
             info = {
                 # Price / market data
-                "currentPrice":            _raw(fd,  "currentPrice"),
-                "regularMarketPrice":      _raw(pr,  "regularMarketPrice"),
-                "marketCap":               _raw(pr,  "marketCap"),
-                "currency":                pr.get("currency") or fd.get("financialCurrency"),
-                # Company identity
-                "longName":                pr.get("longName"),
-                "shortName":               pr.get("shortName"),
-                "sector":                  ap.get("sector"),
-                "industry":                ap.get("industry"),
-                "website":                 ap.get("website"),
-                "longBusinessSummary":     ap.get("longBusinessSummary"),
-                # Share data
-                "sharesOutstanding":       _raw(dk,  "sharesOutstanding"),
-                "impliedSharesOutstanding":_raw(dk,  "impliedSharesOutstanding"),
-                "floatShares":             _raw(dk,  "floatShares"),
-                "bookValue":               _raw(dk,  "bookValue"),
-                # Valuation ratios
-                "trailingPE":              _raw(sd,  "trailingPE"),
-                "forwardPE":               _raw(dk,  "forwardPE"),
-                "priceToBook":             _raw(dk,  "priceToBook"),
-                "priceToSalesTrailing12Months": _raw(sd, "priceToSalesTrailing12Months"),
-                "enterpriseToEbitda":      _raw(dk,  "enterpriseToEbitda"),
-                "enterpriseToRevenue":     _raw(dk,  "enterpriseToRevenue"),
-                "enterpriseValue":         _raw(dk,  "enterpriseValue"),
-                "beta":                    _raw(dk,  "beta"),
-                # Profitability (pre-computed by Yahoo)
-                "grossMargins":            _raw(fd,  "grossMargins"),
-                "operatingMargins":        _raw(fd,  "operatingMargins"),
-                "profitMargins":           _raw(fd,  "profitMargins"),
-                "ebitdaMargins":           _raw(fd,  "ebitdaMargins"),
-                "returnOnEquity":          _raw(fd,  "returnOnEquity"),
-                "returnOnAssets":          _raw(fd,  "returnOnAssets"),
+                "currentPrice":             price,
+                "regularMarketPrice":       price,
+                "marketCap":                market_cap,
+                "currency":                 _e("currency", currency),
+                # Company identity (only from .info; None if blocked)
+                "longName":                 _e("longName") or _e("shortName"),
+                "shortName":                _e("shortName"),
+                "sector":                   _e("sector"),
+                "industry":                 _e("industry"),
+                "website":                  _e("website"),
+                "longBusinessSummary":      _e("longBusinessSummary"),
+                # Shares
+                "sharesOutstanding":        shares,
+                "impliedSharesOutstanding": shares,
+                "floatShares":              _e("floatShares"),
+                "bookValue":                book_value_ps,
+                # Valuation ratios — prefer .info, fall back to computed
+                "trailingPE":               _e("trailingPE", pe_computed),
+                "forwardPE":                _e("forwardPE"),
+                "priceToBook":              _e("priceToBook", pb_computed),
+                "priceToSalesTrailing12Months": _e("priceToSalesTrailing12Months",
+                                               _sf(market_cap / revenue) if market_cap and revenue else None),
+                "enterpriseToEbitda":       _e("enterpriseToEbitda", ev_ebitda_comp),
+                "enterpriseToRevenue":      _e("enterpriseToRevenue",
+                                               _sf(ev_computed / revenue) if revenue else None),
+                "enterpriseValue":          _e("enterpriseValue", ev_computed),
+                "beta":                     _e("beta"),
+                # Profitability — prefer .info, fall back to computed from statements
+                "grossMargins":             _e("grossMargins",     gross_margins),
+                "operatingMargins":         _e("operatingMargins", op_margins),
+                "profitMargins":            _e("profitMargins",    profit_margins),
+                "ebitdaMargins":            _e("ebitdaMargins",    ebitda_margins),
+                "returnOnEquity":           _e("returnOnEquity",   roe),
+                "returnOnAssets":           _e("returnOnAssets",   roa),
                 # Cash flow
-                "freeCashflow":            _raw(fd,  "freeCashflow"),
-                "operatingCashflow":       _raw(fd,  "operatingCashflow"),
+                "freeCashflow":             _e("freeCashflow", fcf),
+                "operatingCashflow":        _e("operatingCashflow", op_cf),
                 # Balance sheet
-                "totalDebt":               _raw(fd,  "totalDebt"),
-                "totalCash":               _raw(fd,  "totalCash"),
-                "debtToEquity":            _raw(fd,  "debtToEquity"),
-                "currentRatio":            _raw(fd,  "currentRatio"),
-                "quickRatio":              _raw(fd,  "quickRatio"),
+                "totalDebt":                _e("totalDebt",  tot_debt),
+                "totalCash":                _e("totalCash"),
+                "debtToEquity":             _e("debtToEquity", debt_to_equity),
+                "currentRatio":             _e("currentRatio", current_ratio),
+                "quickRatio":               _e("quickRatio"),
                 # Revenue / EBITDA
-                "totalRevenue":            _raw(fd,  "totalRevenue"),
-                "ebitda":                  _raw(fd,  "ebitda"),
-                "grossProfits":            _raw(fd,  "grossProfits"),
+                "totalRevenue":             _e("totalRevenue", revenue),
+                "ebitda":                   _e("ebitda", ebitda),
+                "grossProfits":             _e("grossProfits", gross_p),
                 # Dividend
-                "dividendYield":           _raw(sd,  "dividendYield"),
-                "payoutRatio":             _raw(sd,  "payoutRatio"),
+                "dividendYield":            _e("dividendYield"),
+                "payoutRatio":              _e("payoutRatio"),
                 # Equity book value (used in WACC)
-                "totalStockholderEquity":  None,  # filled below if possible
+                "totalStockholderEquity":   tot_equity,
+                # P/FCF
+                "p_fcf":                    pfcf_computed,
             }
 
-            # Compute totalStockholderEquity from bookValue * sharesOutstanding if missing
-            bv = info.get("bookValue")
-            sh = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
-            if bv and sh:
-                info["totalStockholderEquity"] = bv * sh
-
-            if len([v for v in info.values() if v is not None]) < 5:
-                raise Exception("Too few fields — likely rate-limited or bad ticker")
-
-            # Build a yf.Ticker using the same warmed session so subsequent
-            # .financials / .cashflow / .balance_sheet calls reuse cookies.
-            ticker_obj = yf.Ticker(sym, session=session)
-
-            return ticker_obj, info
+            logger.info("fetch_ticker_info OK for %s (price=%.2f, FCF=%s, beta=%s)",
+                        sym, price, fcf, info.get("beta"))
+            return t, info
 
         except Exception as e:
             if attempt < retries - 1:
@@ -207,6 +258,15 @@ def fetch_ticker_info(sym: str, retries: int = 3, delay: float = 2.0):
             else:
                 raise
     raise Exception(f"fetch_ticker_info failed for {sym} after {retries} attempts")
+
+
+def _sf(val, decimals=4):
+    """Safe float — returns None for None/NaN."""
+    try:
+        v = float(val)
+        return None if (v != v) else round(v, decimals)
+    except (TypeError, ValueError):
+        return None
 
 
 def _cffi_session():
