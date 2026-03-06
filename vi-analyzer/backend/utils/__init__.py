@@ -6,7 +6,7 @@ from config import Config
 
 
 def _cffi_session():
-    return cffi_requests.Session(impersonate="chrome")
+    return cffi_requests.Session(impersonate="chrome124")
 
 
 def fetch_price_history(ticker: str, period: str = None, interval: str = None) -> pd.DataFrame:

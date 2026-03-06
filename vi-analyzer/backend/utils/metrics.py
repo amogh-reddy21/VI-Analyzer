@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 def _yf_ticker_with_retry(sym: str, retries: int = 3, delay: float = 2.0):
-    """Fetch yfinance Ticker using curl_cffi session to bypass rate limits."""
+    """Fetch yfinance Ticker using curl_cffi chrome124 session to bypass rate limits."""
     from curl_cffi import requests as cffi_requests
     for attempt in range(retries):
         try:
-            session = cffi_requests.Session(impersonate="chrome")
+            session = cffi_requests.Session(impersonate="chrome124")
             t = yf.Ticker(sym, session=session)
             info = t.info or {}
             if len(info) < 5:
@@ -23,7 +23,7 @@ def _yf_ticker_with_retry(sym: str, retries: int = 3, delay: float = 2.0):
         except Exception as e:
             if attempt < retries - 1:
                 wait = delay * (2 ** attempt)
-                logger.warning("yfinance failed for %s, retrying in %.1fs (attempt %d/%d): %s", sym, wait, attempt+1, retries, e)
+                logger.warning("yfinance failed for %s, retrying in %.1fs (%d/%d): %s", sym, wait, attempt+1, retries, e)
                 time.sleep(wait)
             else:
                 raise

@@ -18,23 +18,24 @@ logger = logging.getLogger(__name__)
 
 
 def _yf_ticker_with_retry(sym: str, retries: int = 3, delay: float = 2.0):
-    """Fetch yfinance Ticker info with retry on rate-limit (429) errors."""
+    """Fetch yfinance Ticker using curl_cffi chrome124 session to bypass rate limits."""
+    from curl_cffi import requests as cffi_requests
     for attempt in range(retries):
         try:
-            t = yf.Ticker(sym)
+            session = cffi_requests.Session(impersonate="chrome124")
+            t = yf.Ticker(sym, session=session)
             info = t.info or {}
-            # yfinance returns an almost-empty dict on rate-limit; detect it
-            if info.get("trailingPegRatio") is None and info.get("symbol") is None and len(info) < 5:
+            if len(info) < 5:
                 raise Exception("Too Many Requests")
             return t, info
         except Exception as e:
-            if attempt < retries - 1 and ("429" in str(e) or "Too Many" in str(e) or "Rate" in str(e)):
+            if attempt < retries - 1:
                 wait = delay * (2 ** attempt)
-                logger.warning("yfinance rate-limited for %s, retrying in %.1fs (attempt %d/%d)", sym, wait, attempt+1, retries)
+                logger.warning("yfinance failed for %s, retrying in %.1fs (%d/%d): %s", sym, wait, attempt+1, retries, e)
                 time.sleep(wait)
             else:
                 raise
-    raise Exception(f"yfinance rate-limited for {sym} after {retries} attempts")
+    raise Exception(f"yfinance failed for {sym} after {retries} attempts")
 
 # ── WACC constants ────────────────────────────────────────────────────────────
 # Used for auto-computing WACC when the caller doesn't supply scenario overrides.
