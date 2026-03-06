@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: vi-analyzer-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 2 --timeout 120 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: FLASK_DEBUG
+        value: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false
+      - key: DEFAULT_PERIOD
+        value: 1y
+      - key: DEFAULT_INTERVAL
+        value: 1d
