@@ -3,9 +3,29 @@ utils/metrics.py
 Compute 15+ fundamental metrics from yfinance Ticker objects.
 """
 import logging
+import time
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
+
+
+def _yf_ticker_with_retry(sym: str, retries: int = 3, delay: float = 2.0):
+    """Fetch yfinance Ticker info with retry on rate-limit (429) errors."""
+    for attempt in range(retries):
+        try:
+            t = yf.Ticker(sym)
+            info = t.info or {}
+            if info.get("trailingPegRatio") is None and info.get("symbol") is None and len(info) < 5:
+                raise Exception("Too Many Requests")
+            return t, info
+        except Exception as e:
+            if attempt < retries - 1 and ("429" in str(e) or "Too Many" in str(e) or "Rate" in str(e)):
+                wait = delay * (2 ** attempt)
+                logger.warning("yfinance rate-limited for %s, retrying in %.1fs", sym, wait)
+                time.sleep(wait)
+            else:
+                raise
+    raise Exception(f"yfinance rate-limited for {sym} after {retries} attempts")
 
 # ── Tax rate used in ROIC: EBIT × (1 - TAX_RATE) / Invested Capital ─────────
 # US statutory corporate rate. Override per ticker if jurisdiction is known.
@@ -166,8 +186,7 @@ def fetch_fundamentals(ticker_sym: str) -> dict:
     Returns a dict with keys: info, income_trend, balance_trend,
     cashflow_trend, metrics, scorecard.
     """
-    t = yf.Ticker(ticker_sym)
-    info = t.info or {}
+    t, info = _yf_ticker_with_retry(ticker_sym)
 
     # ── Raw statements (annual, most-recent first) ──────────────────────────
     try:
