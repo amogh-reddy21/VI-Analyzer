@@ -21,8 +21,9 @@ def _get_crumb(session: cffi_requests.Session) -> str | None:
     extract the crumb token directly from the HTML.
 
     The /v1/test/getcrumb API endpoint is rate-limited on shared IPs (e.g.
-    Render free tier), so we parse the crumb from the page source instead —
-    Yahoo Finance embeds it in a JSON blob in every quote page response.
+    Render free tier), so we parse the crumb from the page source instead.
+    Yahoo Finance embeds it in the page JSON boot data as:
+      "user":{"age":...,"crumb":"XXXXXXXXXXX",...}
 
     Returns the crumb string, or None on failure.
     """
@@ -33,10 +34,17 @@ def _get_crumb(session: cffi_requests.Session) -> str | None:
             allow_redirects=True,
         )
         if r.status_code == 200:
-            matches = re.findall(r'"crumb":"([^"]{5,25})"', r.text)
-            if matches:
-                logger.debug("Extracted crumb from HTML: %s", matches[0])
-                return matches[0]
+            # Primary: user crumb in boot JSON — correct one for quoteSummary
+            import re as _re
+            m = _re.search(r'"user":\{"age":[^}]*"crumb":"([^"]{5,25})"', r.text)
+            if m:
+                logger.debug("Extracted user crumb from HTML: %s", m.group(1))
+                return m.group(1)
+            # Fallback: any crumb value next to the key
+            m2 = _re.search(r'"crumb"\s*:\s*"([A-Za-z0-9/_.\-]{5,25})"', r.text)
+            if m2:
+                logger.debug("Extracted crumb (fallback) from HTML: %s", m2.group(1))
+                return m2.group(1)
     except Exception as e:
         logger.warning("_get_crumb failed: %s", e)
     return None
