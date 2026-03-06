@@ -26,8 +26,22 @@ def debug_crumb():
         out["yahoo_status"] = r1.status_code
         out["yahoo_url"] = str(r1.url)
         out["html_len"] = len(r1.text)
-        matches = re.findall(r'"crumb":"([^"]{5,25})"', r1.text)
-        out["crumb_matches"] = matches[:3]
+        html = r1.text
+        # Show all contexts around "crumb" to find the right pattern
+        contexts = []
+        for m in re.finditer(r"[Cc]rumb", html):
+            ctx = html[max(0, m.start()-30):m.start()+80]
+            contexts.append(ctx)
+        out["crumb_contexts"] = contexts[:8]
+        # Try all patterns
+        patterns = {
+            "user_crumb": r'"user":\{"age":[^}]*"crumb":"([^"]{5,25})"',
+            "searchCrumb": r'"searchCrumb":"([^"]{5,25})"',
+            "generic_crumb": r'"crumb":"([A-Za-z0-9/_.\-]{5,25})"',
+        }
+        for name, pat in patterns.items():
+            m2 = re.search(pat, html)
+            out[name] = m2.group(1) if m2 else None
         # also try the API endpoint
         r2 = session.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=10)
         out["getcrumb_status"] = r2.status_code
