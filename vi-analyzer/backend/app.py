@@ -6,7 +6,7 @@ from routes import api
 app = Flask(__name__)
 app.config.from_object(Config)
 
-CORS(app, origins=Config.CORS_ORIGINS)
+CORS(app, origins="*", supports_credentials=False)
 
 app.register_blueprint(api)
 

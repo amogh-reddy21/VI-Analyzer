@@ -9,7 +9,7 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-in-prod")
 
     # CORS
-    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
 
     # Stock data defaults
     DEFAULT_PERIOD = os.getenv("DEFAULT_PERIOD", "1y")   # lookback window for yfinance
