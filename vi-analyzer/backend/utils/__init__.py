@@ -17,15 +17,16 @@ def _make_session() -> cffi_requests.Session:
 
 def _get_crumb(session: cffi_requests.Session) -> str | None:
     """
-    Warm the session cookies by visiting the Yahoo Finance quote page and
-    extract the crumb token directly from the HTML.
+    Fetch the Yahoo Finance crumb needed for v10/quoteSummary API calls.
 
-    The /v1/test/getcrumb API endpoint is rate-limited on shared IPs (e.g.
-    Render free tier), so we parse the crumb from the page source instead.
-    Yahoo Finance embeds it in the page JSON boot data as:
-      "user":{"age":...,"crumb":"XXXXXXXXXXX",...}
+    Strategy (in order):
+    1. Visit finance.yahoo.com/quote/AAPL/ and extract the crumb from the
+       HTML boot JSON — works even when the /v1/test/getcrumb endpoint is
+       rate-limited. The HTML contains the crumb both as plain JSON and as
+       a backslash-escaped JS string inside a <script> tag.
+    2. Fall back to /v1/test/getcrumb if HTML extraction fails.
 
-    Returns the crumb string, or None on failure.
+    Returns the crumb string, or None if all methods fail.
     """
     try:
         r = session.get(
@@ -34,21 +35,32 @@ def _get_crumb(session: cffi_requests.Session) -> str | None:
             allow_redirects=True,
         )
         if r.status_code == 200:
-            # Primary: user crumb in boot JSON — correct one for quoteSummary
-            import re as _re
-            m = _re.search(r'"user":\{"age":[^}]*"crumb":"([^"]{5,25})"', r.text)
+            html = r.text
+            # Pattern A: escaped JS string in <script> tag
+            #   \"user\":{\"age\":...\"crumb\":\"XXXXX\"
+            m = re.search(r'\\"user\\":\{\\"age\\":[^}]*\\"crumb\\":\\"([^\\]{5,25})\\"', html)
             if m:
-                logger.debug("Extracted user crumb from HTML: %s", m.group(1))
+                logger.debug("Extracted crumb (escaped JS): %s", m.group(1))
                 return m.group(1)
-            # Fallback: any crumb value next to the key
-            m2 = _re.search(r'"crumb"\s*:\s*"([A-Za-z0-9/_.\-]{5,25})"', r.text)
+            # Pattern B: plain JSON (unescaped)
+            #   "user":{"age":..."crumb":"XXXXX"
+            m2 = re.search(r'"user":\{"age":[^}]*"crumb":"([^"]{5,25})"', html)
             if m2:
-                logger.debug("Extracted crumb (fallback) from HTML: %s", m2.group(1))
+                logger.debug("Extracted crumb (plain JSON): %s", m2.group(1))
                 return m2.group(1)
     except Exception as e:
-        logger.warning("_get_crumb failed: %s", e)
-    return None
+        logger.warning("_get_crumb HTML extraction failed: %s", e)
 
+    # Fallback: API endpoint (may be rate-limited on shared IPs)
+    try:
+        rc = session.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+        if rc.status_code == 200 and rc.text.strip():
+            logger.debug("Got crumb from /v1/test/getcrumb: %s", rc.text.strip())
+            return rc.text.strip()
+    except Exception as e:
+        logger.warning("_get_crumb API fallback failed: %s", e)
+
+    return None
 
 def fetch_ticker_info(sym: str, retries: int = 3, delay: float = 2.0):
     """
