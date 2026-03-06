@@ -16,20 +16,36 @@ def _make_session() -> cffi_requests.Session:
 
 def _get_crumb(session: cffi_requests.Session) -> str | None:
     """
-    Warm the session cookies by visiting a Yahoo Finance page, then fetch
-    the crumb token required for authenticated quoteSummary API calls.
+    Warm the session cookies by visiting Yahoo Finance, then fetch the
+    crumb token required for authenticated quoteSummary API calls.
+
+    Tries multiple warm-up URLs and crumb endpoints for resilience.
     Returns the crumb string, or None on failure.
     """
-    try:
-        session.get("https://finance.yahoo.com/", timeout=15)
-        r = session.get(
-            "https://query2.finance.yahoo.com/v1/test/getcrumb",
-            timeout=10,
-        )
-        if r.status_code == 200 and r.text.strip():
-            return r.text.strip()
-    except Exception as e:
-        logger.warning("Failed to obtain Yahoo Finance crumb: %s", e)
+    warm_urls = [
+        "https://finance.yahoo.com/",
+        "https://finance.yahoo.com/markets/",
+        "https://query2.finance.yahoo.com/v8/finance/chart/AAPL",
+    ]
+    crumb_urls = [
+        "https://query2.finance.yahoo.com/v1/test/getcrumb",
+        "https://query1.finance.yahoo.com/v1/test/getcrumb",
+    ]
+    for warm_url in warm_urls:
+        try:
+            rw = session.get(warm_url, timeout=20, allow_redirects=True)
+            logger.debug("Warmed session via %s (status %s)", warm_url, rw.status_code)
+            if rw.status_code in (200, 301, 302):
+                for crumb_url in crumb_urls:
+                    try:
+                        rc = session.get(crumb_url, timeout=10)
+                        if rc.status_code == 200 and rc.text.strip():
+                            logger.debug("Got crumb from %s", crumb_url)
+                            return rc.text.strip()
+                    except Exception as ce:
+                        logger.warning("Crumb fetch failed from %s: %s", crumb_url, ce)
+        except Exception as e:
+            logger.warning("Warm-up failed for %s: %s", warm_url, e)
     return None
 
 
