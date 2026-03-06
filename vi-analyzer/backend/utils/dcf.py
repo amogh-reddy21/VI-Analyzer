@@ -11,31 +11,9 @@ Raises ValueError when FCF is unavailable or non-positive (DCF is not
 meaningful without positive free cash flow).
 """
 import logging
-import time
-import yfinance as yf
+from utils import fetch_ticker_info
 
 logger = logging.getLogger(__name__)
-
-
-def _yf_ticker_with_retry(sym: str, retries: int = 3, delay: float = 2.0):
-    """Fetch yfinance Ticker using curl_cffi chrome124 session to bypass rate limits."""
-    from curl_cffi import requests as cffi_requests
-    for attempt in range(retries):
-        try:
-            session = cffi_requests.Session(impersonate="chrome124")
-            t = yf.Ticker(sym, session=session)
-            info = t.info or {}
-            if len(info) < 5:
-                raise Exception("Too Many Requests")
-            return t, info
-        except Exception as e:
-            if attempt < retries - 1:
-                wait = delay * (2 ** attempt)
-                logger.warning("yfinance failed for %s, retrying in %.1fs (%d/%d): %s", sym, wait, attempt+1, retries, e)
-                time.sleep(wait)
-            else:
-                raise
-    raise Exception(f"yfinance failed for {sym} after {retries} attempts")
 
 # ── WACC constants ────────────────────────────────────────────────────────────
 # Used for auto-computing WACC when the caller doesn't supply scenario overrides.
@@ -129,7 +107,7 @@ def compute_dcf(ticker_sym: str, scenarios: dict = None) -> dict:
             "bull": {"growth_rate": 0.18, "terminal_growth": 0.04, "wacc": 0.08},
         }
 
-    t, info = _yf_ticker_with_retry(ticker_sym)
+    t, info = fetch_ticker_info(ticker_sym)
 
     # ── Pull trailing FCF ────────────────────────────────────────────────────
     base_fcf = _safe(info.get("freeCashflow"))

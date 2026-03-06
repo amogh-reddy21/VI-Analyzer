@@ -3,31 +3,9 @@ utils/metrics.py
 Compute 15+ fundamental metrics from yfinance Ticker objects.
 """
 import logging
-import time
-import yfinance as yf
+from utils import fetch_ticker_info
 
 logger = logging.getLogger(__name__)
-
-
-def _yf_ticker_with_retry(sym: str, retries: int = 3, delay: float = 2.0):
-    """Fetch yfinance Ticker using curl_cffi chrome124 session to bypass rate limits."""
-    from curl_cffi import requests as cffi_requests
-    for attempt in range(retries):
-        try:
-            session = cffi_requests.Session(impersonate="chrome124")
-            t = yf.Ticker(sym, session=session)
-            info = t.info or {}
-            if len(info) < 5:
-                raise Exception("Too Many Requests")
-            return t, info
-        except Exception as e:
-            if attempt < retries - 1:
-                wait = delay * (2 ** attempt)
-                logger.warning("yfinance failed for %s, retrying in %.1fs (%d/%d): %s", sym, wait, attempt+1, retries, e)
-                time.sleep(wait)
-            else:
-                raise
-    raise Exception(f"yfinance failed for {sym} after {retries} attempts")
 
 # ── Tax rate used in ROIC: EBIT × (1 - TAX_RATE) / Invested Capital ─────────
 # US statutory corporate rate. Override per ticker if jurisdiction is known.
@@ -188,7 +166,7 @@ def fetch_fundamentals(ticker_sym: str) -> dict:
     Returns a dict with keys: info, income_trend, balance_trend,
     cashflow_trend, metrics, scorecard.
     """
-    t, info = _yf_ticker_with_retry(ticker_sym)
+    t, info = fetch_ticker_info(ticker_sym)
 
     # ── Raw statements (annual, most-recent first) ──────────────────────────
     try:
@@ -263,18 +241,18 @@ def fetch_fundamentals(ticker_sym: str) -> dict:
     cl_l    = latest(current_liab)
     eb_l    = latest(ebitda)
 
-    gross_margin   = _safe(gp_l  / rev_l  * 100) if rev_l  and gp_l  else None
-    op_margin      = _safe(ebit_l / rev_l * 100) if rev_l  and ebit_l else None
-    net_margin     = _safe(ni_l  / rev_l  * 100) if rev_l  and ni_l  else None
+    gross_margin   = _safe(gp_l  / rev_l  * 100) if rev_l  and gp_l  else _safe((info.get("grossMargins") or 0) * 100) or None
+    op_margin      = _safe(ebit_l / rev_l * 100) if rev_l  and ebit_l else _safe((info.get("operatingMargins") or 0) * 100) or None
+    net_margin     = _safe(ni_l  / rev_l  * 100) if rev_l  and ni_l  else _safe((info.get("profitMargins") or 0) * 100) or None
     fcf_margin     = _safe(fcf_l / rev_l  * 100) if rev_l  and fcf_l else None
-    roe            = _safe(ni_l  / eq_l   * 100) if eq_l   and ni_l  else None
-    roa            = _safe(ni_l  / ta_l   * 100) if ta_l   and ni_l  else None
+    roe            = _safe(ni_l  / eq_l   * 100) if eq_l   and ni_l  else _safe((info.get("returnOnEquity") or 0) * 100) or None
+    roa            = _safe(ni_l  / ta_l   * 100) if ta_l   and ni_l  else _safe((info.get("returnOnAssets") or 0) * 100) or None
     # ROIC = EBIT(1-t) / (Equity + Debt)
     inv_capital    = (eq_l or 0) + (debt_l or 0)
     roic           = _safe(ebit_l * (1 - TAX_RATE) / inv_capital * 100) if inv_capital and ebit_l else None
-    debt_equity    = _safe(debt_l / eq_l) if eq_l and debt_l else None
+    debt_equity    = _safe(debt_l / eq_l) if eq_l and debt_l else _safe((info.get("debtToEquity") or 0) / 100) or None
     interest_cov   = _safe(ebit_l / abs(latest(interest_exp))) if latest(interest_exp) and ebit_l else None
-    current_ratio  = _safe(ca_l  / cl_l) if ca_l and cl_l else None
+    current_ratio  = _safe(ca_l  / cl_l) if ca_l and cl_l else _safe(info.get("currentRatio"))
     pe             = _safe(info.get("trailingPE") or info.get("forwardPE"))
     pb             = _safe(info.get("priceToBook"))
     ps             = _safe(info.get("priceToSalesTrailing12Months"))

@@ -3,6 +3,181 @@ import pandas as pd
 import yfinance as yf
 from curl_cffi import requests as cffi_requests
 from config import Config
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
+
+def _make_session() -> cffi_requests.Session:
+    """Create a curl_cffi session impersonating Chrome 124."""
+    return cffi_requests.Session(impersonate="chrome124")
+
+
+def _get_crumb(session: cffi_requests.Session) -> str | None:
+    """
+    Warm the session cookies by visiting a Yahoo Finance page, then fetch
+    the crumb token required for authenticated quoteSummary API calls.
+    Returns the crumb string, or None on failure.
+    """
+    try:
+        session.get("https://finance.yahoo.com/", timeout=15)
+        r = session.get(
+            "https://query2.finance.yahoo.com/v1/test/getcrumb",
+            timeout=10,
+        )
+        if r.status_code == 200 and r.text.strip():
+            return r.text.strip()
+    except Exception as e:
+        logger.warning("Failed to obtain Yahoo Finance crumb: %s", e)
+    return None
+
+
+def fetch_ticker_info(sym: str, retries: int = 3, delay: float = 2.0):
+    """
+    Fetch a yfinance Ticker plus a rich ``info`` dict for *sym* using
+    the crumb-based Yahoo Finance v10/quoteSummary API.
+
+    Strategy
+    --------
+    1. Create a curl_cffi chrome124 session.
+    2. Warm the session (cookies) and obtain a crumb token.
+    3. Fetch v10/quoteSummary with all useful modules.
+    4. Build an ``info`` dict compatible with the rest of the codebase.
+    5. Return (ticker, info, session) — the same session is passed to
+       ``yf.Ticker`` so subsequent ``.financials`` / ``.cashflow`` /
+       ``.balance_sheet`` calls reuse the authenticated cookies.
+
+    Raises
+    ------
+    Exception  if all retries fail or the response contains fewer than
+               5 meaningful keys (Yahoo rate-limit sentinel).
+    """
+    MODULES = (
+        "financialData,defaultKeyStatistics,"
+        "incomeStatementHistory,cashflowStatementHistory,"
+        "balanceSheetHistory,summaryDetail,price,assetProfile"
+    )
+
+    for attempt in range(retries):
+        try:
+            session = _make_session()
+            crumb = _get_crumb(session)
+            if not crumb:
+                raise Exception("Could not obtain crumb")
+
+            url = (
+                f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
+                f"?modules={MODULES}&crumb={crumb}"
+            )
+            resp = session.get(url, timeout=20)
+
+            if resp.status_code == 401:
+                raise Exception("Yahoo Finance returned 401 (invalid crumb/cookies)")
+            if resp.status_code == 429:
+                raise Exception("Too Many Requests")
+            if resp.status_code != 200:
+                raise Exception(f"quoteSummary returned HTTP {resp.status_code}")
+
+            result = resp.json().get("quoteSummary", {}).get("result") or []
+            if not result:
+                error = resp.json().get("quoteSummary", {}).get("error") or {}
+                raise Exception(f"quoteSummary error: {error}")
+
+            raw = result[0]
+
+            def _raw(section: dict, key: str):
+                v = section.get(key)
+                if isinstance(v, dict):
+                    return v.get("raw")
+                return v
+
+            fd  = raw.get("financialData",       {})
+            dk  = raw.get("defaultKeyStatistics", {})
+            sd  = raw.get("summaryDetail",        {})
+            pr  = raw.get("price",                {})
+            ap  = raw.get("assetProfile",         {})
+
+            info = {
+                # Price / market data
+                "currentPrice":            _raw(fd,  "currentPrice"),
+                "regularMarketPrice":      _raw(pr,  "regularMarketPrice"),
+                "marketCap":               _raw(pr,  "marketCap"),
+                "currency":                pr.get("currency") or fd.get("financialCurrency"),
+                # Company identity
+                "longName":                pr.get("longName"),
+                "shortName":               pr.get("shortName"),
+                "sector":                  ap.get("sector"),
+                "industry":                ap.get("industry"),
+                "website":                 ap.get("website"),
+                "longBusinessSummary":     ap.get("longBusinessSummary"),
+                # Share data
+                "sharesOutstanding":       _raw(dk,  "sharesOutstanding"),
+                "impliedSharesOutstanding":_raw(dk,  "impliedSharesOutstanding"),
+                "floatShares":             _raw(dk,  "floatShares"),
+                "bookValue":               _raw(dk,  "bookValue"),
+                # Valuation ratios
+                "trailingPE":              _raw(sd,  "trailingPE"),
+                "forwardPE":               _raw(dk,  "forwardPE"),
+                "priceToBook":             _raw(dk,  "priceToBook"),
+                "priceToSalesTrailing12Months": _raw(sd, "priceToSalesTrailing12Months"),
+                "enterpriseToEbitda":      _raw(dk,  "enterpriseToEbitda"),
+                "enterpriseToRevenue":     _raw(dk,  "enterpriseToRevenue"),
+                "enterpriseValue":         _raw(dk,  "enterpriseValue"),
+                "beta":                    _raw(dk,  "beta"),
+                # Profitability (pre-computed by Yahoo)
+                "grossMargins":            _raw(fd,  "grossMargins"),
+                "operatingMargins":        _raw(fd,  "operatingMargins"),
+                "profitMargins":           _raw(fd,  "profitMargins"),
+                "ebitdaMargins":           _raw(fd,  "ebitdaMargins"),
+                "returnOnEquity":          _raw(fd,  "returnOnEquity"),
+                "returnOnAssets":          _raw(fd,  "returnOnAssets"),
+                # Cash flow
+                "freeCashflow":            _raw(fd,  "freeCashflow"),
+                "operatingCashflow":       _raw(fd,  "operatingCashflow"),
+                # Balance sheet
+                "totalDebt":               _raw(fd,  "totalDebt"),
+                "totalCash":               _raw(fd,  "totalCash"),
+                "debtToEquity":            _raw(fd,  "debtToEquity"),
+                "currentRatio":            _raw(fd,  "currentRatio"),
+                "quickRatio":              _raw(fd,  "quickRatio"),
+                # Revenue / EBITDA
+                "totalRevenue":            _raw(fd,  "totalRevenue"),
+                "ebitda":                  _raw(fd,  "ebitda"),
+                "grossProfits":            _raw(fd,  "grossProfits"),
+                # Dividend
+                "dividendYield":           _raw(sd,  "dividendYield"),
+                "payoutRatio":             _raw(sd,  "payoutRatio"),
+                # Equity book value (used in WACC)
+                "totalStockholderEquity":  None,  # filled below if possible
+            }
+
+            # Compute totalStockholderEquity from bookValue * sharesOutstanding if missing
+            bv = info.get("bookValue")
+            sh = info.get("sharesOutstanding") or info.get("impliedSharesOutstanding")
+            if bv and sh:
+                info["totalStockholderEquity"] = bv * sh
+
+            if len([v for v in info.values() if v is not None]) < 5:
+                raise Exception("Too few fields — likely rate-limited or bad ticker")
+
+            # Build a yf.Ticker using the same warmed session so subsequent
+            # .financials / .cashflow / .balance_sheet calls reuse cookies.
+            ticker_obj = yf.Ticker(sym, session=session)
+
+            return ticker_obj, info
+
+        except Exception as e:
+            if attempt < retries - 1:
+                wait = delay * (2 ** attempt)
+                logger.warning(
+                    "fetch_ticker_info failed for %s, retrying in %.1fs (%d/%d): %s",
+                    sym, wait, attempt + 1, retries, e,
+                )
+                time.sleep(wait)
+            else:
+                raise
+    raise Exception(f"fetch_ticker_info failed for {sym} after {retries} attempts")
 
 
 def _cffi_session():
