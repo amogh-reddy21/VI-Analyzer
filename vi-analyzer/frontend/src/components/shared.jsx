@@ -1,7 +1,12 @@
 // Shared constants, helpers, and small presentational components
 // used across all tab components.
 
+import axios from "axios";
+
 export const API = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000/api";
+
+// Give Render free tier up to 90s to wake from sleep
+axios.defaults.timeout = 90000;
 export const PERIODS = ["1mo", "3mo", "6mo", "1y", "2y", "5y"];
 export const WINDOWS  = [10, 21, 30, 63];
 
@@ -84,6 +89,15 @@ export function GradeChip({ grade }) {
   return <span className={`chip ${cls[grade] || "chip-na"}`}>{lbl[grade] || "N/A"}</span>;
 }
 
-export function Spinner() {
-  return <div className="spinner-wrap"><div className="spinner" /></div>;
+export function Spinner({ slow }) {
+  return (
+    <div className="spinner-wrap">
+      <div className="spinner" />
+      {slow && (
+        <p style={{ color: "#8884d8", fontSize: 13, marginTop: 12, textAlign: "center" }}>
+          ⏳ Waking up the server… this can take up to 60s on the free tier.
+        </p>
+      )}
+    </div>
+  );
 }

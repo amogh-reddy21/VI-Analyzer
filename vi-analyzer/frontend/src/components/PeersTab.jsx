@@ -22,6 +22,7 @@ export default function PeersTab({ period, window_ }) {
   const [tickers, setTickers] = useState("");
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(false);
+  const [slowLoad, setSlowLoad] = useState(false);
   const [error, setError]     = useState(null);
 
   async function fetchPeers(e) {
@@ -31,12 +32,12 @@ export default function PeersTab({ period, window_ }) {
     const syms = raw.split(",").map(s => s.trim()).filter(Boolean);
     const invalid = syms.filter(s => !isValidTicker(s));
     if (invalid.length) { setError(`Invalid symbols: ${invalid.join(", ")}`); return; }
-    setLoading(true); setError(null); setData(null);
+    setLoading(true); setSlowLoad(false); const _slowTimer = setTimeout(() => setSlowLoad(true), 5000); setError(null); setData(null);
     try {
       const res = await axios.get(`${API}/peers`, { params: { tickers: raw } });
       setData(res.data);
     } catch (err) { setError(err.response?.data?.error || err.message); }
-    finally { setLoading(false); }
+    finally { setLoading(false); setSlowLoad(false); clearTimeout(_slowTimer); }
   }
 
   const syms = data ? Object.keys(data).filter(k => !data[k].error) : [];
@@ -64,7 +65,7 @@ export default function PeersTab({ period, window_ }) {
         </button>
       </form>
       {error && <div className="error-banner">⚠ {error}</div>}
-      {loading && <Spinner />}
+      {loading && <Spinner slow={slowLoad} />}
 
       {data && syms.length > 0 && (
         <>

@@ -33,6 +33,7 @@ export default function ValuationTab({ period, window_ }) {
   const [ticker, setTicker]   = useState("");
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(false);
+  const [slowLoad, setSlowLoad] = useState(false);
   const [error, setError]     = useState(null);
   const [bearG, setBearG]     = useState(5);
   const [baseG, setBaseG]     = useState(10);
@@ -46,7 +47,7 @@ export default function ValuationTab({ period, window_ }) {
     const sym = ticker.trim().toUpperCase();
     if (!sym) return;
     if (!isValidTicker(sym)) { setError("Invalid ticker symbol."); return; }
-    setLoading(true); setError(null); setData(null); setWaccSuggested(null); setSectorBucket(null);
+    setLoading(true); setSlowLoad(false); const _slowTimer = setTimeout(() => setSlowLoad(true), 5000); setError(null); setData(null); setWaccSuggested(null); setSectorBucket(null);
 
     // First fetch beta to auto-suggest WACC
     let suggestedWacc = null;
@@ -76,7 +77,7 @@ export default function ValuationTab({ period, window_ }) {
       setData(res.data);
       if (res.data?.sector_bucket) setSectorBucket(res.data.sector_bucket);
     } catch (err) { setError(err.response?.data?.error || err.message); }
-    finally { setLoading(false); }
+    finally { setLoading(false); setSlowLoad(false); clearTimeout(_slowTimer); }
   }
 
   const s = data?.scenarios || {};
@@ -128,7 +129,7 @@ export default function ValuationTab({ period, window_ }) {
         </button>
       </form>
       {error && <div className="error-banner">⚠ {error}</div>}
-      {loading && <Spinner />}
+      {loading && <Spinner slow={slowLoad} />}
 
       {data && (
         <>

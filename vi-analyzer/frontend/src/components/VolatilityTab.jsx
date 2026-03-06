@@ -17,19 +17,20 @@ export default function VolatilityTab({ period, window_ }) {
   const [compareData, setCompareData] = useState(null);
   const [cmpLoading, setCmpLoading]   = useState(false);
   const [cmpError, setCmpError]       = useState(null);
+  const [slowLoad, setSlowLoad] = useState(false);
 
   async function fetchSummary(e) {
     e.preventDefault();
     const sym = ticker.trim().toUpperCase();
     if (!sym) return;
     if (!isValidTicker(sym)) { setError("Invalid ticker symbol."); return; }
-    setLoading(true); setError(null); setData(null);
+    setLoading(true); setSlowLoad(false); const _slowTimer = setTimeout(() => setSlowLoad(true), 5000); setError(null); setData(null);
     try {
       const res = await axios.get(`${API}/stock/${sym}/summary`,
         { params: { period, window: window_ } });
       setData(res.data);
     } catch (err) { setError(err.response?.data?.error || err.message); }
-    finally { setLoading(false); }
+    finally { setLoading(false); setSlowLoad(false); clearTimeout(_slowTimer); }
   }
 
   async function fetchCompare(e) {
@@ -63,7 +64,7 @@ export default function VolatilityTab({ period, window_ }) {
         </button>
       </form>
       {error && <div className="error-banner">⚠ {error}</div>}
-      {loading && <Spinner />}
+      {loading && <Spinner slow={slowLoad} />}
 
       {data && (
         <>

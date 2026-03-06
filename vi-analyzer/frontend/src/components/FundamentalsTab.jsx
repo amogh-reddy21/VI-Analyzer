@@ -14,6 +14,7 @@ export default function FundamentalsTab({ period, window_ }) {
   const [ticker, setTicker]   = useState("");
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(false);
+  const [slowLoad, setSlowLoad] = useState(false);
   const [error, setError]     = useState(null);
 
   async function fetchFund(e) {
@@ -21,12 +22,12 @@ export default function FundamentalsTab({ period, window_ }) {
     const sym = ticker.trim().toUpperCase();
     if (!sym) return;
     if (!isValidTicker(sym)) { setError("Invalid ticker symbol."); return; }
-    setLoading(true); setError(null); setData(null);
+    setLoading(true); setSlowLoad(false); const _slowTimer = setTimeout(() => setSlowLoad(true), 5000); setError(null); setData(null);
     try {
       const res = await axios.get(`${API}/stock/${sym}/fundamentals`, { params: { period, window: window_ } });
       setData(res.data);
     } catch (err) { setError(err.response?.data?.error || err.message); }
-    finally { setLoading(false); }
+    finally { setLoading(false); setSlowLoad(false); clearTimeout(_slowTimer); }
   }
 
   const passCount = data ? Object.values(data.scorecard).filter(v => v === "pass").length : 0;
@@ -43,7 +44,7 @@ export default function FundamentalsTab({ period, window_ }) {
         </button>
       </form>
       {error && <div className="error-banner">⚠ {error}</div>}
-      {loading && <Spinner />}
+      {loading && <Spinner slow={slowLoad} />}
 
       {data && (
         <>
