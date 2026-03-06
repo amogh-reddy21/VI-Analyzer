@@ -1,19 +1,24 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from curl_cffi import requests as cffi_requests
 from config import Config
+
+
+def _cffi_session():
+    return cffi_requests.Session(impersonate="chrome")
 
 
 def fetch_price_history(ticker: str, period: str = None, interval: str = None) -> pd.DataFrame:
     """
-    Fetch OHLCV data for a ticker via yfinance.
+    Fetch OHLCV data for a ticker via yfinance using curl_cffi to bypass rate limits.
     Returns a DataFrame with columns: Open, High, Low, Close, Volume.
     Raises ValueError if the ticker is invalid or no data returned.
     """
     period = period or Config.DEFAULT_PERIOD
     interval = interval or Config.DEFAULT_INTERVAL
 
-    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True, session=_cffi_session())
 
     if df.empty:
         raise ValueError(f"No price data found for ticker '{ticker}'. Check the symbol.")
