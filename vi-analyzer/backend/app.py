@@ -14,5 +14,27 @@ app.register_blueprint(api)
 def index():
     return {"status": "ok", "message": "VI-Analyzer API is running. Use /api/... endpoints."}
 
+@app.route("/api/debug/crumb")
+def debug_crumb():
+    """Diagnostic: test Yahoo Finance crumb fetching from this server."""
+    import re
+    from curl_cffi import requests as cffi_requests
+    out = {}
+    session = cffi_requests.Session(impersonate="chrome124")
+    try:
+        r1 = session.get("https://finance.yahoo.com/quote/AAPL/", timeout=20, allow_redirects=True)
+        out["yahoo_status"] = r1.status_code
+        out["yahoo_url"] = str(r1.url)
+        out["html_len"] = len(r1.text)
+        matches = re.findall(r'"crumb":"([^"]{5,25})"', r1.text)
+        out["crumb_matches"] = matches[:3]
+        # also try the API endpoint
+        r2 = session.get("https://query2.finance.yahoo.com/v1/test/getcrumb", timeout=10)
+        out["getcrumb_status"] = r2.status_code
+        out["getcrumb_text"] = r2.text[:50]
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
 if __name__ == "__main__":
     app.run(debug=Config.DEBUG, port=5000)
